@@ -535,7 +535,10 @@ class HQQLinear(nn.Module):
         return self
 
     def to(self, *args, **kwargs):
-        # TODO: later
+        if args[0].type == 'cuda':
+            self = self.cuda("cuda")
+        elif args[0].type == 'cpu':
+            self = self.cpu()
         return self
 
     # TODO: later
@@ -561,7 +564,58 @@ class HQQLinear(nn.Module):
         return self
 
     def cpu(self):
-        # TODO: later
+        self.meta["compute_dtype"] = self.compute_dtype
+        if type(self.W_q) == nn.parameter.Parameter:
+            self.W_q.data, self.meta = Quantizer.cpu(self.W_q.data, self.meta)
+        else:
+            self.W_q, self.meta = Quantizer.cpu(self.W_q, self.meta)
+        if self.meta["quant_zero"]:
+            if "zero_q" in self.meta:
+                self.meta["zero_q"], self.meta["meta_zero"] = Quantizer.cpu(
+                    self.meta["zero_q"], self.meta["meta_zero"]
+                )
+            else:
+                _, self.meta["meta_zero"] = Quantizer.cpu(
+                    None, self.meta["meta_zero"]
+                )
+        else:
+            self.meta["zero"] = self.meta["zero"].to('cpu')
+        if self.meta["quant_scale"]:
+            if "scale_q" in self.meta:
+                self.meta["scale_q"], self.meta["meta_scale"] = Quantizer.cpu(
+                    self.meta["scale_q"], self.meta["meta_scale"], device
+                )
+            else:
+                _, self.meta["meta_scale"] = Quantizer.cuda(
+                    None, self.meta["meta_scale"]
+                )
+        else:
+            self.meta["scale"] = self.meta["scale"].to('cpu')
+        # #Use zero/scale with streams for dequantization is faster than packing in "zero_scale"
+        # for key in ["zero", "zero_q", "scale", "scale_q"]:
+        #     if((key in self.meta) and self.offload_meta):
+        #         self.meta[key] = self.meta[key].contiguous().cpu().pin_memory()
+        if self.offload_meta:
+            if "zero_scale" not in self.meta:
+                if self.meta["quant_scale"] and self.meta["quant_zero"]:
+                    self.meta["zero_scale"] = torch.stack(
+                        (self.meta["zero_q"], self.meta["scale_q"])
+                    )
+                    del self.meta["scale_q"], self.meta["zero_q"]
+                else:
+                    self.meta["zero_scale"] = torch.stack(
+                        (self.meta["zero"], self.meta["scale"])
+                    ).to(self.compute_dtype)
+                    del self.meta["scale"], self.meta["zero"]
+            self.meta["zero_scale"] = (
+                self.meta["zero_scale"].contiguous().cpu().pin_memory()
+            )
+        if self.bias is not None:
+            self.bias = self.bias.to(device='cpu', dtype=self.compute_dtype)
+        self.W_q = nn.Parameter(self.W_q, requires_grad=False)
+        self.device = 'cpu'
+        self.in_gpu = False
+        torch.cuda.empty_cache()
         return self
 
     # state_dict is encoded by default for safetensors support. You can get the raw dict by setting self.encoded_state_dict=False. \
